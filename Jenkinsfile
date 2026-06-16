@@ -1,10 +1,8 @@
 pipeline {
-  agent {
-    label 'docker'
-  }
+  agent any    // Docker socket is mounted — works on any agent
 
   environment {
-    HARBOR_REGISTRY = "http://10.0.1.21:30002"
+    HARBOR_REGISTRY = "10.0.1.21:30002"
     IMAGE_NAME      = "devsecops/vulnerable-app"
     IMAGE_TAG       = "${BUILD_NUMBER}"
     SONAR_HOST      = "http://10.0.1.21:32661"
@@ -20,17 +18,14 @@ pipeline {
 
   stages {
 
-    // ------------------------------------------------------------------
     stage('Checkout') {
       steps {
         checkout scm
-        echo "Building branch: ${env.BRANCH_NAME} | commit: ${env.GIT_COMMIT}"
+        echo "Branch: ${env.BRANCH_NAME} | Commit: ${env.GIT_COMMIT}"
       }
     }
 
-    // ------------------------------------------------------------------
-    // SECURITY GATE 1: Secret Detection with TruffleHog
-    // ------------------------------------------------------------------
+    // ── SECURITY GATE 1: TruffleHog ──────────────────────────────────
     stage('Secret Scan — TruffleHog') {
       steps {
         script {
@@ -58,7 +53,7 @@ pipeline {
             returnStatus: true
           )
           if (exitCode != 0) {
-            error("TruffleHog detected secrets in the codebase. Review trufflehog-report.json.")
+            error("TruffleHog detected secrets. Review trufflehog-report.json.")
           }
         }
       }
@@ -69,22 +64,16 @@ pipeline {
       }
     }
 
-    // ------------------------------------------------------------------
-    // Unit Tests
-    // ------------------------------------------------------------------
+    // ── Unit Tests ────────────────────────────────────────────────────
     stage('Unit Tests') {
       steps {
-          sh '''
-      docker run --rm \
-        -v ${WORKSPACE}/app:/app \
-        -w /app \
-        node:20-alpine \
-        sh -c "
-          npm ci &&
-          npm test
-        "
-    '''
-       
+        sh '''
+          docker run --rm \
+            -v ${WORKSPACE}/app:/app \
+            -w /app \
+            node:20-alpine \
+            sh -c "npm ci && npm test"
+        '''
       }
       post {
         always {
@@ -93,9 +82,7 @@ pipeline {
       }
     }
 
-    // ------------------------------------------------------------------
-    // SECURITY GATE 2: SAST with SonarQube
-    // ------------------------------------------------------------------
+    // ── SECURITY GATE 2: SonarQube SAST ──────────────────────────────
     stage('SAST — SonarQube') {
       steps {
         withSonarQubeEnv('SonarQube') {
@@ -124,13 +111,12 @@ pipeline {
       }
     }
 
-    // ------------------------------------------------------------------
-    // SECURITY GATE 3: OWASP Dependency-Check
-    // ------------------------------------------------------------------
+    // ── SECURITY GATE 3: OWASP Dependency-Check ──────────────────────
     stage('OWASP Dependency-Check') {
       steps {
         sh """
           mkdir -p ${WORKSPACE}/odc-reports
+
           docker run --rm \
             -v ${WORKSPACE}/app:/src \
             -v ${WORKSPACE}/odc-reports:/report \
@@ -159,9 +145,7 @@ pipeline {
       }
     }
 
-    // ------------------------------------------------------------------
-    // Build and Push Image to Harbor
-    // ------------------------------------------------------------------
+    // ── Build & Push to Harbor ────────────────────────────────────────
     stage('Build & Push Image') {
       steps {
         sh """
@@ -184,9 +168,8 @@ pipeline {
       }
     }
 
-    // ------------------------------------------------------------------
-    // SECURITY GATE 4: Image Vulnerability Scan with Trivy
-    // ------------------------------------------------------------------
+    // ── SECURITY GATE 4: Trivy Image Scan ────────────────────────────
+    // Socket is mounted — Trivy can reach Docker normally
     stage('Image Scan — Trivy') {
       steps {
         sh """
@@ -215,9 +198,7 @@ pipeline {
       }
     }
 
-    // ------------------------------------------------------------------
-    // Deploy to kubeadm Cluster via Helm
-    // ------------------------------------------------------------------
+    // ── Deploy to Kubernetes via Helm ─────────────────────────────────
     stage('Deploy to Kubernetes') {
       steps {
         sh """
@@ -243,14 +224,8 @@ pipeline {
   }
 
   post {
-    failure {
-      echo "Pipeline FAILED at stage. Check archived reports and console output."
-    }
-    success {
-      echo "Pipeline PASSED — image ${IMAGE_TAG} deployed to kubeadm cluster."
-    }
-    always {
-      cleanWs()
-    }
+    failure { echo "Pipeline FAILED — check archived reports." }
+    success { echo "Pipeline PASSED — image ${IMAGE_TAG} deployed." }
+    always  { cleanWs() }
   }
 }
