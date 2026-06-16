@@ -1,0 +1,27 @@
+replicaCount: 3
+
+image:
+  repository: harbor.local/devsecops/vulnerable-app
+  tag: "latest"
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: harbor-secret
+
+service:
+  type: NodePort
+  port: 80
+  targetPort: 3000
+  nodePort: 30080
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "256Mi"
+
+labels:
+  team: platform-engineering
+  environment: dev

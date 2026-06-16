@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vulnerable-app
+  namespace: devsecops
+  labels:
+    app: vulnerable-app
+    team: platform-engineering
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vulnerable-app
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: vulnerable-app
+        team: platform-engineering
+    spec:
+      imagePullSecrets:
+        - name: harbor-secret
+ 
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+ 
+      containers:
+        - name: app
+          image: harbor.local/devsecops/vulnerable-app:IMAGE_TAG_PLACEHOLDER
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+ 
+          env:
+            - name: PORT
+              value: "3000"
+            - name: APP_VERSION
+              value: "IMAGE_TAG_PLACEHOLDER"
+ 
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+ 
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+ 
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+ 
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+ 
+
