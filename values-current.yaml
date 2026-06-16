@@ -1,23 +1,26 @@
 controller:
   serviceType: NodePort
-  nodePort: 31180       # access Jenkins at http://<node-ip>:32000
+  nodePort: 31180
+
+  # No plugins downloaded at init — install via UI after Jenkins starts
+
+  javaOpts: "-Djenkins.install.runSetupWizard=false"
+
+  # No Docker socket needed on the controller anymore
+  # Each pipeline stage runs in its own purpose-built container
+
 
 agent:
   enabled: true
 
-  # Mount the host Docker socket into every agent pod
-  volumes:
-    - type: HostPath
-      hostPath: /var/run/docker.sock
-      mountPath: /var/run/docker.sock
+  # No Docker socket mount needed — Kaniko handles builds
+  # Trivy pulls from Harbor registry directly
+  # All tools run as native binaries in their own containers
 
-  # Give agent permission to use the socket
-  # docker group id on Ubuntu is usually 999 — verify with: stat -c '%g' /var/run/docker.sock
-  runAsGroup: 999
-  privileged: false       # no need for privileged — socket mount is enough
-
-
-  # Install docker CLI inside the agent container
-  # The socket is the daemon — agent just needs the CLI to talk to it
-  containerCap: 10
-
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
