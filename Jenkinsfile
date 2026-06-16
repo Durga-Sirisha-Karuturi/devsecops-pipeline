@@ -1,5 +1,7 @@
 pipeline {
-  agent any
+  agent {
+    label 'docker'
+  }
 
   environment {
     HARBOR_REGISTRY = "http://10.0.1.21:30002"
