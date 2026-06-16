@@ -73,17 +73,18 @@ pipeline {
     // Unit Tests
     // ------------------------------------------------------------------
     stage('Unit Tests') {
-      agent {
-        docker {
-          image 'node:20-alpine'
-          reuseNode true
-        }
-      }
       steps {
-        dir('app') {
-          sh 'npm ci'
-          sh 'npm test'
-        }
+          sh '''
+      docker run --rm \
+        -v ${WORKSPACE}/app:/app \
+        -w /app \
+        node:20-alpine \
+        sh -c "
+          npm ci &&
+          npm test
+        "
+    '''
+       
       }
       post {
         always {
