@@ -1,106 +1,13 @@
 pipeline {
-
-  // ── Agent pod: all tools as separate containers, NO Docker daemon ──
-  agent {
-    kubernetes {
-      yaml """
-apiVersion: v1
-kind: Pod
-spec:
-  volumes:
-    - name: workspace-vol
-      emptyDir: {}
-    - name: kaniko-secret
-      secret:
-        secretName: harbor-kaniko-secret
-        items:
-          - key: .dockerconfigjson
-            path: config.json
-
-  containers:
-
-    # ── 1. Default container: runs shell steps ──────────────────────
-    - name: jnlp
-      image: jenkins/inbound-agent:latest
-      volumeMounts:
-        - name: workspace-vol
-          mountPath: /home/jenkins/agent
-
-    # ── 2. Node.js for unit tests ───────────────────────────────────
-    - name: node
-      image: node:20-alpine
-      command: [cat]
-      tty: true
-      volumeMounts:
-        - name: workspace-vol
-          mountPath: /home/jenkins/agent
-
-    # ── 3. Kaniko for building and pushing image (no Docker needed) ─
-    - name: kaniko
-      image: gcr.io/kaniko-project/executor:latest
-      command: [/busybox/cat]
-      tty: true
-      volumeMounts:
-        - name: workspace-vol
-          mountPath: /home/jenkins/agent
-        - name: kaniko-secret
-          mountPath: /kaniko/.docker
-
-    # ── 4. Trivy for image scanning ─────────────────────────────────
-    - name: trivy
-      image: aquasec/trivy:latest
-      command: [cat]
-      tty: true
-      volumeMounts:
-        - name: workspace-vol
-          mountPath: /home/jenkins/agent
-
-    # ── 5. SonarQube scanner ─────────────────────────────────────────
-    - name: sonar
-      image: sonarsource/sonar-scanner-cli:latest
-      command: [cat]
-      tty: true
-      volumeMounts:
-        - name: workspace-vol
-          mountPath: /home/jenkins/agent
-
-    # ── 6. OWASP Dependency-Check ────────────────────────────────────
-    - name: owasp
-      image: owasp/dependency-check:latest
-      command: [cat]
-      tty: true
-      volumeMounts:
-        - name: workspace-vol
-          mountPath: /home/jenkins/agent
-
-    # ── 7. TruffleHog secret scanner ─────────────────────────────────
-    - name: trufflehog
-      image: trufflesecurity/trufflehog:latest
-      command: [cat]
-      tty: true
-      volumeMounts:
-        - name: workspace-vol
-          mountPath: /home/jenkins/agent
-
-    # ── 8. Helm + kubectl for deploy ────────────────────────────────
-    - name: helm
-      image: alpine/helm:latest
-      command: [cat]
-      tty: true
-      volumeMounts:
-        - name: workspace-vol
-          mountPath: /home/jenkins/agent
-"""
-      defaultContainer 'jnlp'
-    }
-  }
+  agent any
 
   environment {
-    HARBOR_REGISTRY = "10.0.1.21:30002"
+    HARBOR_REGISTRY = "harbor.local"
     IMAGE_NAME      = "devsecops/vulnerable-app"
     IMAGE_TAG       = "${BUILD_NUMBER}"
-    SONAR_HOST      = "http://10.0.1.21:32661"
+    SONAR_HOST      = "http://sonarqube.local:9000"
     KUBECONFIG      = credentials('kubeconfig-cred')
+    HARBOR_CREDS    = credentials('harbor-credentials')
   }
 
   options {
@@ -111,41 +18,45 @@ spec:
 
   stages {
 
+    // ------------------------------------------------------------------
     stage('Checkout') {
       steps {
         checkout scm
-        echo "Branch: ${env.BRANCH_NAME} | Commit: ${env.GIT_COMMIT}"
+        echo "Building branch: ${env.BRANCH_NAME} | commit: ${env.GIT_COMMIT}"
       }
     }
 
-    // ── SECURITY GATE 1: TruffleHog Secret Scan ──────────────────────
+    // ------------------------------------------------------------------
+    // SECURITY GATE 1: Secret Detection with TruffleHog
+    // ------------------------------------------------------------------
     stage('Secret Scan — TruffleHog') {
       steps {
-        container('trufflehog') {
-          script {
-            def exitCode = sh(
-              script: '''
-                trufflehog filesystem ${WORKSPACE} \
-                  --fail \
-                  --json > ${WORKSPACE}/trufflehog-report.json 2>&1 || true
+        script {
+          def exitCode = sh(
+            script: '''
+              docker run --rm \
+                -v "${WORKSPACE}:/repo" \
+                trufflesecurity/trufflehog:latest \
+                filesystem /repo \
+                --fail \
+                --json > trufflehog-report.json 2>&1 || true
 
-                FOUND=$(cat ${WORKSPACE}/trufflehog-report.json | \
-                  python3 -c \
-                  "import sys; lines=[l for l in sys.stdin.read().strip().split('\\n') if l]; print(len(lines))" \
-                  2>/dev/null || echo 0)
+              FOUND=$(cat trufflehog-report.json | \
+                python3 -c \
+                "import sys; lines=[l for l in sys.stdin.read().strip().split('\\n') if l]; print(len(lines))" \
+                2>/dev/null || echo 0)
 
-                echo "TruffleHog findings: $FOUND"
-                if [ "$FOUND" -gt "0" ]; then
-                  echo "SECRETS DETECTED — failing build"
-                  cat ${WORKSPACE}/trufflehog-report.json
-                  exit 1
-                fi
-              ''',
-              returnStatus: true
-            )
-            if (exitCode != 0) {
-              error("TruffleHog detected secrets. Review trufflehog-report.json.")
-            }
+              echo "TruffleHog findings: $FOUND"
+              if [ "$FOUND" -gt "0" ]; then
+                echo "SECRETS DETECTED — failing build"
+                cat trufflehog-report.json
+                exit 1
+              fi
+            ''',
+            returnStatus: true
+          )
+          if (exitCode != 0) {
+            error("TruffleHog detected secrets in the codebase. Review trufflehog-report.json.")
           }
         }
       }
@@ -156,15 +67,20 @@ spec:
       }
     }
 
-    // ── Unit Tests ────────────────────────────────────────────────────
+    // ------------------------------------------------------------------
+    // Unit Tests
+    // ------------------------------------------------------------------
     stage('Unit Tests') {
+      agent {
+        docker {
+          image 'node:20-alpine'
+          reuseNode true
+        }
+      }
       steps {
-        container('node') {
-          sh '''
-            cd ${WORKSPACE}/app
-            npm ci
-            npm test
-          '''
+        dir('app') {
+          sh 'npm ci'
+          sh 'npm test'
         }
       }
       post {
@@ -174,21 +90,25 @@ spec:
       }
     }
 
-    // ── SECURITY GATE 2: SonarQube SAST ──────────────────────────────
+    // ------------------------------------------------------------------
+    // SECURITY GATE 2: SAST with SonarQube
+    // ------------------------------------------------------------------
     stage('SAST — SonarQube') {
       steps {
-        container('sonar') {
-          withSonarQubeEnv('SonarQube') {
-            sh """
+        withSonarQubeEnv('SonarQube') {
+          sh """
+            docker run --rm --network host \
+              -v ${WORKSPACE}/app:/app \
+              -e SONAR_HOST_URL=${SONAR_HOST} \
+              -e SONAR_TOKEN=${SONAR_AUTH_TOKEN} \
+              sonarsource/sonar-scanner-cli:latest \
               sonar-scanner \
                 -Dsonar.projectKey=devsecops-app \
                 -Dsonar.projectName="DevSecOps Demo App" \
-                -Dsonar.sources=${WORKSPACE}/app \
+                -Dsonar.sources=/app \
                 -Dsonar.exclusions=**/node_modules/**,**/coverage/** \
-                -Dsonar.host.url=${SONAR_HOST} \
-                -Dsonar.token=${SONAR_AUTH_TOKEN}
-            """
-          }
+                -Dsonar.host.url=${SONAR_HOST}
+          """
         }
       }
     }
@@ -201,23 +121,25 @@ spec:
       }
     }
 
-    // ── SECURITY GATE 3: OWASP Dependency-Check ──────────────────────
+    // ------------------------------------------------------------------
+    // SECURITY GATE 3: OWASP Dependency-Check
+    // ------------------------------------------------------------------
     stage('OWASP Dependency-Check') {
       steps {
-        container('owasp') {
-          sh """
-            mkdir -p ${WORKSPACE}/odc-reports
-
-            /usr/share/dependency-check/bin/dependency-check.sh \
-              --scan ${WORKSPACE}/app \
-              --format HTML \
-              --format JSON \
-              --out ${WORKSPACE}/odc-reports \
-              --failOnCVSS 7 \
-              --enableRetired \
-              --project "vulnerable-app"
-          """
-        }
+        sh """
+          mkdir -p ${WORKSPACE}/odc-reports
+          docker run --rm \
+            -v ${WORKSPACE}/app:/src \
+            -v ${WORKSPACE}/odc-reports:/report \
+            owasp/dependency-check:latest \
+            --scan /src \
+            --format HTML \
+            --format JSON \
+            --out /report \
+            --failOnCVSS 7 \
+            --enableRetired \
+            --project "vulnerable-app"
+        """
       }
       post {
         always {
@@ -234,43 +156,51 @@ spec:
       }
     }
 
-    // ── Build & Push with Kaniko (no Docker daemon) ───────────────────
-    stage('Build & Push Image — Kaniko') {
+    // ------------------------------------------------------------------
+    // Build and Push Image to Harbor
+    // ------------------------------------------------------------------
+    stage('Build & Push Image') {
       steps {
-        container('kaniko') {
-          sh """
-            /kaniko/executor \
-              --context=${WORKSPACE}/app \
-              --dockerfile=${WORKSPACE}/app/Dockerfile \
-              --destination=${HARBOR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \
-              --destination=${HARBOR_REGISTRY}/${IMAGE_NAME}:latest \
-              --insecure \
-              --skip-tls-verify \
-              --label build.number=${BUILD_NUMBER} \
-              --label git.commit=${GIT_COMMIT}
-          """
-        }
+        sh """
+          cd app
+
+          echo "${HARBOR_CREDS_PSW}" | docker login ${HARBOR_REGISTRY} \
+            -u "${HARBOR_CREDS_USR}" --password-stdin
+
+          docker build \
+            --tag ${HARBOR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \
+            --tag ${HARBOR_REGISTRY}/${IMAGE_NAME}:latest \
+            --label "build.number=${BUILD_NUMBER}" \
+            --label "git.commit=${GIT_COMMIT}" \
+            --label "git.branch=${BRANCH_NAME}" \
+            .
+
+          docker push ${HARBOR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+          docker push ${HARBOR_REGISTRY}/${IMAGE_NAME}:latest
+        """
       }
     }
 
-    // ── SECURITY GATE 4: Trivy Image Scan ────────────────────────────
-    // Trivy pulls the image from Harbor directly — no Docker socket needed
+    // ------------------------------------------------------------------
+    // SECURITY GATE 4: Image Vulnerability Scan with Trivy
+    // ------------------------------------------------------------------
     stage('Image Scan — Trivy') {
       steps {
-        container('trivy') {
-          sh """
-            mkdir -p ${WORKSPACE}/trivy-cache
+        sh """
+          mkdir -p ${WORKSPACE}/trivy-cache
 
-            trivy image \
-              --exit-code 1 \
-              --severity HIGH,CRITICAL \
-              --format json \
-              --output ${WORKSPACE}/trivy-report.json \
-              --cache-dir ${WORKSPACE}/trivy-cache \
-              --insecure \
-              ${HARBOR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
-          """
-        }
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v ${WORKSPACE}/trivy-cache:/root/.cache/trivy \
+            aquasec/trivy:latest image \
+            --exit-code 1 \
+            --severity HIGH,CRITICAL \
+            --format json \
+            --output /tmp/trivy-report.json \
+            ${HARBOR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+
+          cp /tmp/trivy-report.json ${WORKSPACE}/trivy-report.json
+        """
       }
       post {
         always {
@@ -282,39 +212,42 @@ spec:
       }
     }
 
-    // ── Deploy to Kubernetes via Helm ─────────────────────────────────
+    // ------------------------------------------------------------------
+    // Deploy to kubeadm Cluster via Helm
+    // ------------------------------------------------------------------
     stage('Deploy to Kubernetes') {
       steps {
-        container('helm') {
-          sh """
-            export KUBECONFIG=${KUBECONFIG}
+        sh """
+          export KUBECONFIG=${KUBECONFIG}
 
-            # Install kubectl into the helm container (alpine/helm has apk)
-            apk add --no-cache kubectl 2>/dev/null || true
+          helm upgrade --install vulnerable-app ./helm/vulnerable-app \
+            --namespace devsecops \
+            --create-namespace \
+            --set image.tag=${IMAGE_TAG} \
+            --set image.repository=${HARBOR_REGISTRY}/${IMAGE_NAME} \
+            --set labels.environment=production \
+            --wait \
+            --timeout 120s
 
-            helm upgrade --install vulnerable-app ${WORKSPACE}/helm/vulnerable-app \
-              --namespace devsecops \
-              --create-namespace \
-              --set image.tag=${IMAGE_TAG} \
-              --set image.repository=${HARBOR_REGISTRY}/${IMAGE_NAME} \
-              --set labels.environment=production \
-              --wait \
-              --timeout 120s
+          kubectl rollout status deployment/vulnerable-app-app \
+            -n devsecops --timeout=120s
 
-            kubectl rollout status deployment/vulnerable-app-app \
-              -n devsecops --timeout=120s
-
-            echo "Deployed image tag: ${IMAGE_TAG}"
-            kubectl get pods -n devsecops
-          """
-        }
+          echo "Deployed image tag: ${IMAGE_TAG}"
+          kubectl get pods -n devsecops
+        """
       }
     }
   }
 
   post {
-    failure { echo "Pipeline FAILED — check archived reports." }
-    success { echo "Pipeline PASSED — image ${IMAGE_TAG} deployed." }
-    always  { cleanWs() }
+    failure {
+      echo "Pipeline FAILED at stage. Check archived reports and console output."
+    }
+    success {
+      echo "Pipeline PASSED — image ${IMAGE_TAG} deployed to kubeadm cluster."
+    }
+    always {
+      cleanWs()
+    }
   }
 }
