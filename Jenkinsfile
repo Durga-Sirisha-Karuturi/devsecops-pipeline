@@ -2,10 +2,10 @@ pipeline {
     agent any
 
     environment {
-        HARBOR_REGISTRY = 'harbor.local'
+        HARBOR_REGISTRY = 'http://10.0.1.21:30002/'
         IMAGE_NAME = 'devsecops/vulnerable-app'
         IMAGE_TAG = "${BUILD_NUMBER}"
-        SONAR_HOST = 'http://sonarqube.local:9000'
+        SONAR_HOST = 'http://10.0.1.21:32661/'
 
         KUBECONFIG = credentials('kubeconfig-cred')
         HARBOR_CREDS = credentials('harbor-credentials')
