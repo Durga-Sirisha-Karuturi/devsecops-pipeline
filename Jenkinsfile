@@ -101,6 +101,7 @@ pipeline {
                             npx sonar-scanner \
                               -Dsonar.projectKey=vulnerable-app \
                               -Dsonar.sources=. \
+                              -Dsonar.exclusions=node_modules/**,coverage/** \
                               -Dsonar.host.url=${SONAR_HOST} \
                               -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
                         '''
