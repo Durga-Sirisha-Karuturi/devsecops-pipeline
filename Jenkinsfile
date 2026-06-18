@@ -132,6 +132,7 @@ pipeline {
                         --scan app/
                         --format HTML
                         --format JSON
+                        --format XML
                         --out .
                         --failOnCVSS 8
                         --enableRetired
