@@ -2,13 +2,15 @@ pipeline {
     agent any
 
     environment {
-        HARBOR_REGISTRY   = 'http://10.0.1.21:30002/'
-        IMAGE_NAME        = 'devsecops/vulnerable-app'
-        IMAGE_TAG         = "${BUILD_NUMBER}"
-        SONAR_HOST        = 'http://10.0.1.21:32661/'
-        KUBECONFIG        = credentials('kubeconfig-cred')
-        HARBOR_CREDS      = credentials('harbor-credentials')
-        NVD_API_KEY       = credentials('nvd-api-key')
+        HARBOR_REGISTRY = '10.0.1.21:30002/'
+        IMAGE_NAME      = 'devsecops/vulnerable-app'
+        IMAGE_TAG       = "${BUILD_NUMBER}"
+
+        SONAR_HOST      = 'http://10.0.1.21:32661/'
+
+        KUBECONFIG      = credentials('kubeconfig-cred')
+        HARBOR_CREDS    = credentials('harbor-credentials')
+        NVD_API_KEY     = credentials('nvd-api-key')
     }
 
     options {
@@ -30,7 +32,7 @@ pipeline {
         }
 
         // ─────────────────────────────────────────────
-        // Stage 2 — Secret Scan (non-blocking warning)
+        // Stage 2 — Secret Scan
         // ─────────────────────────────────────────────
         stage('Secret Scan - TruffleHog') {
             steps {
@@ -43,18 +45,17 @@ pipeline {
                           --json > trufflehog-report.json 2>&1 || true
 
                         FOUND=$(grep -c '"SourceMetadata"' trufflehog-report.json || true)
+
                         echo "TruffleHog findings: $FOUND"
 
                         if [ "$FOUND" -gt 0 ]; then
-                            echo "⚠️  WARNING: TruffleHog detected potential secrets in the repository."
-                            echo "Review trufflehog-report.json for details."
+                            echo "⚠️ Potential secrets detected"
                             cat trufflehog-report.json
                         else
-                            echo "✅ No secrets detected by TruffleHog."
+                            echo "✅ No secrets detected"
                         fi
                     '''
-                    // Mark build as UNSTABLE so the warning is visible in Jenkins UI
-                    // without blocking the rest of the pipeline
+
                     def found = sh(
                         script: "grep -c '\"SourceMetadata\"' trufflehog-report.json || true",
                         returnStdout: true
@@ -66,6 +67,7 @@ pipeline {
                     }
                 }
             }
+
             post {
                 always {
                     archiveArtifacts artifacts: 'trufflehog-report.json', allowEmptyArchive: true
@@ -83,16 +85,17 @@ pipeline {
                     sh 'npm test -- --coverage'
                 }
             }
+
             post {
                 always {
-                    // Publish JUnit results if your test runner outputs XML
-                    junit allowEmptyResults: true, testResults: 'app/test-results/**/*.xml'
+                    junit allowEmptyResults: true,
+                          testResults: 'app/test-results/**/*.xml'
                 }
             }
         }
 
         // ─────────────────────────────────────────────
-        // Stage 4 — SAST: SonarQube Analysis
+        // Stage 4 — SonarQube Analysis
         // ─────────────────────────────────────────────
         stage('SAST - SonarQube') {
             steps {
@@ -112,24 +115,24 @@ pipeline {
         }
 
         // ─────────────────────────────────────────────
-        // Stage 5 — SonarQube Quality Gate
+        // Stage 5 — Quality Gate
         // ─────────────────────────────────────────────
         stage('Quality Gate') {
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
-                    // abortPipeline: true → fails build if gate is RED
                     waitForQualityGate abortPipeline: true
                 }
             }
         }
 
         // ─────────────────────────────────────────────
-        // Stage 6 — SCA: OWASP Dependency-Check
+        // Stage 6 — OWASP Dependency Check
         // ─────────────────────────────────────────────
         stage('SCA - OWASP Dependency Check') {
             steps {
+
                 dependencyCheck(
-                    additionalArguments: '''
+                    additionalArguments: """
                         --scan app/
                         --format HTML
                         --format JSON
@@ -138,49 +141,60 @@ pipeline {
                         --out .
                         --failOnCVSS 8
                         --enableRetired
-                    ''',
+                    """,
                     odcInstallation: 'OWASP-Dependency-Check'
                 )
+
                 sh '''
                     echo "=== Dependency Check Reports ==="
                     find . -name "*dependency-check*"
                 '''
             }
+
             post {
                 always {
-                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
-                    archiveArtifacts artifacts: '**/dependency-check-report.*', allowEmptyArchive: true
+                    dependencyCheckPublisher(
+                        pattern: '**/dependency-check-report.xml'
+                    )
 
+                    archiveArtifacts(
+                        artifacts: '**/dependency-check-report.*',
+                        allowEmptyArchive: true
+                    )
                 }
             }
         }
 
         // ─────────────────────────────────────────────
-        // Stage 7 — Build Image: Kaniko (no Docker daemon)
+        // Stage 7 — Build & Push Image
         // ─────────────────────────────────────────────
-        stage('Build Image - Kaniko') {
+        stage('Build & Push Image') {
             steps {
-                script {
-                    sh '''
-                        /kaniko/executor \
-                          --context=${WORKSPACE} \
-                          --dockerfile=${WORKSPACE}/app/Dockerfile \
-                          --destination=${HARBOR_REGISTRY}${IMAGE_NAME}:${IMAGE_TAG} \
-                          --destination=${HARBOR_REGISTRY}${IMAGE_NAME}:latest \
-                          --cache=true \
-                          --cache-repo=${HARBOR_REGISTRY}${IMAGE_NAME}/cache \
-                          --skip-tls-verify
-                    '''
-                }
+                sh '''
+                    echo ${HARBOR_CREDS_PSW} | \
+                      docker login 10.0.1.21:30002 \
+                      -u ${HARBOR_CREDS_USR} \
+                      --password-stdin
+
+                    docker build \
+                      -t ${HARBOR_REGISTRY}${IMAGE_NAME}:${IMAGE_TAG} \
+                      -t ${HARBOR_REGISTRY}${IMAGE_NAME}:latest \
+                      -f app/Dockerfile .
+
+                    docker push ${HARBOR_REGISTRY}${IMAGE_NAME}:${IMAGE_TAG}
+
+                    docker push ${HARBOR_REGISTRY}${IMAGE_NAME}:latest
+                '''
             }
         }
 
         // ─────────────────────────────────────────────
-        // Stage 8 — Image Scan: Trivy (fail on CRITICAL)
+        // Stage 8 — Trivy Scan
         // ─────────────────────────────────────────────
         stage('Image Scan - Trivy') {
             steps {
                 script {
+
                     def exitCode = sh(
                         script: '''
                             docker run --rm \
@@ -195,26 +209,28 @@ pipeline {
                         ''',
                         returnStatus: true
                     )
+
                     if (exitCode != 0) {
                         error('Trivy found CRITICAL vulnerabilities. Blocking deploy.')
                     }
                 }
             }
+
             post {
                 always {
-                    archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'trivy-report.json',
+                                     allowEmptyArchive: true
                 }
             }
         }
 
-        }
-
         // ─────────────────────────────────────────────
-        // Stage 9 — Kyverno Policy Gate (pre-deploy audit)
+        // Stage 9 — Kyverno Policy Gate
         // ─────────────────────────────────────────────
         stage('Kyverno Policy Gate') {
             steps {
                 script {
+
                     def exitCode = sh(
                         script: '''
                             kyverno apply k8s/policies/ \
@@ -225,16 +241,22 @@ pipeline {
                         ''',
                         returnStatus: true
                     )
+
                     if (exitCode != 0) {
+
                         echo "Kyverno policy violations:"
+
                         sh 'cat kyverno-audit.txt'
+
                         error('Kyverno policy gate failed. Fix policy violations before deploying.')
                     }
                 }
             }
+
             post {
                 always {
-                    archiveArtifacts artifacts: 'kyverno-audit.txt', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'kyverno-audit.txt',
+                                     allowEmptyArchive: true
                 }
             }
         }
@@ -244,40 +266,42 @@ pipeline {
         // ─────────────────────────────────────────────
         stage('Deploy to Kubernetes') {
             steps {
+
                 sh '''
                     export KUBECONFIG=${KUBECONFIG}
 
-                    # Substitute image tag in the deployment manifest
-                    sed -i "s|IMAGE_TAG_PLACEHOLDER|${IMAGE_TAG}|g" k8s/deployment.yaml
+                    sed -i "s|IMAGE_TAG_PLACEHOLDER|${IMAGE_TAG}|g" \
+                        k8s/deployment.yaml
 
-                    kubectl apply -f k8s/ --namespace=devsecops
+                    kubectl apply \
+                      -f k8s/ \
+                      --namespace=devsecops
 
-                    # Wait for rollout to complete (fail fast on bad deploy)
-                    kubectl rollout status deployment/vulnerable-app \
+                    kubectl rollout status \
+                      deployment/vulnerable-app \
                       --namespace=devsecops \
                       --timeout=120s
                 '''
             }
         }
+    }
 
-    } // end stages
-
-    // ─────────────────────────────────────────────
-    // Post actions
-    // ─────────────────────────────────────────────
     post {
+
         success {
             echo "✅ Pipeline PASSED — image ${env.IMAGE_NAME}:${env.IMAGE_TAG} deployed."
         }
+
         unstable {
-            echo "⚠️  Pipeline UNSTABLE — secrets were detected by TruffleHog. Review the archived report."
+            echo "⚠️ Pipeline UNSTABLE — secrets were detected by TruffleHog. Review the archived report."
         }
+
         failure {
             echo "❌ Pipeline FAILED — check stage logs above."
         }
+
         always {
             cleanWs()
         }
     }
-
 }
