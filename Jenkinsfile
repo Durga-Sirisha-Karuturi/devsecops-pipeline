@@ -8,6 +8,7 @@ pipeline {
         SONAR_HOST        = 'http://10.0.1.21:32661/'
         KUBECONFIG        = credentials('kubeconfig-cred')
         HARBOR_CREDS      = credentials('harbor-credentials')
+        NVD_API_KEY       = credentials('nvd-api-key')
     }
 
     options {
@@ -133,6 +134,7 @@ pipeline {
                         --format HTML
                         --format JSON
                         --format XML
+                        --nvdApiKey ${NVD_API_KEY}
                         --out .
                         --failOnCVSS 8
                         --enableRetired
@@ -205,24 +207,10 @@ pipeline {
             }
         }
 
-        // ─────────────────────────────────────────────
-        // Stage 9 — Push to Harbor
-        // ─────────────────────────────────────────────
-        stage('Push to Harbor') {
-            steps {
-                sh '''
-                    echo ${HARBOR_CREDS_PSW} | \
-                        docker login ${HARBOR_REGISTRY} \
-                          -u ${HARBOR_CREDS_USR} --password-stdin
-
-                    docker push ${HARBOR_REGISTRY}${IMAGE_NAME}:${IMAGE_TAG}
-                    docker push ${HARBOR_REGISTRY}${IMAGE_NAME}:latest
-                '''
-            }
         }
 
         // ─────────────────────────────────────────────
-        // Stage 10 — Kyverno Policy Gate (pre-deploy audit)
+        // Stage 9 — Kyverno Policy Gate (pre-deploy audit)
         // ─────────────────────────────────────────────
         stage('Kyverno Policy Gate') {
             steps {
@@ -252,7 +240,7 @@ pipeline {
         }
 
         // ─────────────────────────────────────────────
-        // Stage 11 — Deploy to Kubernetes
+        // Stage 10 — Deploy to Kubernetes
         // ─────────────────────────────────────────────
         stage('Deploy to Kubernetes') {
             steps {
