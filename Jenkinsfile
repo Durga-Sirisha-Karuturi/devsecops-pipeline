@@ -139,11 +139,16 @@ pipeline {
                     ''',
                     odcInstallation: 'OWASP-Dependency-Check'
                 )
+                sh '''
+                    echo "=== Dependency Check Reports ==="
+                    find . -name "*dependency-check*"
+                '''
             }
             post {
                 always {
-                    dependencyCheckPublisher pattern: 'dependency-check-report.xml'
-                    archiveArtifacts artifacts: 'dependency-check-report.*', allowEmptyArchive: true
+                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                    archiveArtifacts artifacts: '**/dependency-check-report.*', allowEmptyArchive: true
+
                 }
             }
         }
